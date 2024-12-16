@@ -177,30 +177,35 @@ def low_rank_state_to_cov(state: dict) -> Callable:
 # General api
 # ---------------------------------------------------------------------------------
 
+# Instantiates log-likelihood matrix (e.g. GGN)
 CURVATURE_METHODS = {
     "full": create_full_curvature,
     "diagonal": create_diagonal_curvature,
     "low_rank": create_low_rank_curvature,
 }
 
+# Combines log-prior with log-likelihood (e.g. prior_precision * I +  GGN) to obtain precision matrix of posterior
 CURVATURE_PRIOR_METHODS = {
     "full": full_with_prior,
     "diagonal": diag_with_prior,
     "low_rank": low_rank_with_prior,
 }
 
+# Converts precision matrix to scale
 CURVATURE_TO_POSTERIOR_STATE = {
     "full": full_prec_to_state,
     "diagonal": diag_prec_to_state,
     "low_rank": low_rank_prec_to_state,
 }
 
+# Returns function representing mv product of scale matrix with vector to be supplied
 CURVATURE_STATE_TO_SCALE = {
     "full": full_state_to_scale,
     "diagonal": diag_state_to_scale,
     "low_rank": low_rank_state_to_scale,
 }
 
+# Returns function representing mv product of cov matrix with vector to be supplied
 CURVATURE_STATE_TO_COV = {
     "full": full_state_to_cov,
     "diagonal": diag_state_to_cov,
@@ -254,16 +259,21 @@ def create_posterior_function(
                 - 'cov_mv': Function to compute covariance matrix-vector product.
                 - 'scale_mv': Function to compute scale matrix-vector product.
         """
+        # TODO: 'posterior_kwargs' above should be renamed `prior_kwargs`?
         # Calculate posterior precision.
         precision = CURVATURE_PRIOR_METHODS[curvature_type](
             curv_est=curv_estimator, **posterior_kwargs
         )
 
         # Calculate posterior state
-        state = CURVATURE_TO_POSTERIOR_STATE[curvature_type](precision)
+        state = CURVATURE_TO_POSTERIOR_STATE[curvature_type](
+            precision
+        )  # TODO: Instantiates the scale matrix
 
         # Extract matrix-vector product
-        scale_mv_from_state = CURVATURE_STATE_TO_SCALE[curvature_type]
+        scale_mv_from_state = CURVATURE_STATE_TO_SCALE[
+            curvature_type
+        ]  # TODO: Could we instantiate with state here, to save having to pass it round in the future?
         cov_mv_from_state = CURVATURE_STATE_TO_COV[curvature_type]
 
         return {

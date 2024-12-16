@@ -6,6 +6,7 @@ weight space uncertainty onto output uncertainty.
 
 import math
 from collections import OrderedDict
+from typing import Dict
 
 import jax
 import jax.numpy as jnp
@@ -95,14 +96,16 @@ def mc_samples_fn(n_samples: int = 5, **kwargs):
     return util.tree.tree_slice(kwargs.get("pred_ensemble"), 0, n_samples)
 
 
-DEFAULT_MC_FUNCTIONS = OrderedDict([
-    ("pred", pred_fn),
-    ("pred_mean", mc_pred_mean_fn),
-    ("pred_var", mc_pred_var_fn),
-    ("pred_std", mc_pred_std_fn),
-    ("pred_cov", mc_pred_cov_fn),
-    ("samples", mc_samples_fn),
-])
+DEFAULT_MC_FUNCTIONS = OrderedDict(
+    [
+        ("pred", pred_fn),
+        ("pred_mean", mc_pred_mean_fn),
+        ("pred_var", mc_pred_var_fn),
+        ("pred_std", mc_pred_std_fn),
+        ("pred_cov", mc_pred_cov_fn),
+        ("samples", mc_samples_fn),
+    ]
+)
 
 
 def set_mc_pushforward(  # noqa: PLR0913, PLR0917
@@ -193,18 +196,23 @@ def lin_n_samples_fn(n_samples: int = 5, **kwargs):
     )
 
 
-DEFAULT_LIN_FINALIZE = OrderedDict([
-    ("pred", pred_fn),
-    ("pred_mean", pred_fn),
-    ("pred_var", lin_pred_var_fn),
-    ("pred_std", lin_pred_std_fn),
-    ("pred_cov", lin_pred_cov_fn),
-    ("samples", lin_n_samples_fn),
-])
+DEFAULT_LIN_FINALIZE = OrderedDict(
+    [
+        ("pred", pred_fn),
+        ("pred_mean", pred_fn),
+        ("pred_var", lin_pred_var_fn),
+        ("pred_std", lin_pred_std_fn),
+        ("pred_cov", lin_pred_cov_fn),
+        ("samples", lin_n_samples_fn),
+    ]
+)
 
 
+# Returns mv product for covariance/scale in *output* space
 def set_output_cov_mv(posterior_state, input, jvp, vjp):
-    cov_mv = posterior_state["cov_mv"](posterior_state["state"])
+    cov_mv = posterior_state["cov_mv"](
+        posterior_state["state"]
+    )  # TODO: I think we should already apply with 'posterior_state["state"]' before, to save passing around this 'posterior_state["state"]' parameter?
     scale_mv = posterior_state["scale_mv"](posterior_state["state"])
 
     def output_cov_mv(vec):
@@ -214,6 +222,60 @@ def set_output_cov_mv(posterior_state, input, jvp, vjp):
         return jvp(input, scale_mv(vec))
 
     return {"cov_mv": output_cov_mv, "scale_mv": output_cov_scale_mv}
+
+
+# TODO: If this returned some kind of Gaussian object there would be no need to duplicate code for sampling - we'd just call '.sample()' on the Gaussian object returned.
+def lin_predict(
+    model_fn: Callable,
+    model_params: PyTree,
+    posterior_state: Dict,
+):
+    # Create push-forward functions
+    def pf_jvp(input, vector):
+        return jax.jvp(
+            lambda p: model_fn(params=p, input=input),
+            (model_params,),
+            (vector,),
+        )[1]
+
+    def pf_vjp(input, vector):
+        out, vjp_fun = jax.vjp(lambda p: model_fn(params=p, input=input), model_params)
+        return vjp_fun(vector.reshape(out.shape))
+
+    def prob_predictive(input: jax.Array):
+        # Mean prediction
+        output_mean = model_fn(params=model_params, input=input)
+        weight_cov_mv = posterior_state["cov_mv"](posterior_state["state"])
+        output_cov_mv = pf_jvp(input, weight_cov_mv(pf_vjp(input, input)[0]))
+        return output_mean, output_cov_mv
+
+    return prob_predictive
+
+
+def lin_sample(
+    key: KeyType,
+    model_fn: Callable,
+    model_params: PyTree,
+    posterior_state: Dict,
+    n_samples: int,
+    kwargs,
+):
+    # Get samples in weight-space
+    get_weight_samples = set_get_weight_sample(
+        key,
+        model_params,
+        posterior_state["scale_mv"](posterior_state["state"]),
+        n_samples,
+        **kwargs,  # TODO: Not clear what "kwargs" we should be passing to this function
+    )
+    output_scale = jvp(input, scale_mv(vec))
+    lmap(
+        lambda i: scale_mv(weight_samples(i)),
+        jnp.arange(n_samples),
+        batch_size=kwargs.get("lmap_lin_samples", "weight"),
+    )
+    get_weight_samples()
+    raise NotImplementedError
 
 
 def set_lin_pushforward(  # noqa: PLR0913, PLR0917
