@@ -1,7 +1,29 @@
+from contextlib import contextmanager
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 from jax import random
+from loguru import logger
+
+
+# Context manager to suppress info-level logging
+@contextmanager
+def suppress_info_logging(module: str):
+    logger.disable(module)
+    try:
+        # Only disable INFO and below, allow WARNING and above
+        logger.remove()
+        logger.add(
+            lambda _: None,  # Sink that does nothing
+            level="INFO",  # Only suppress INFO and below
+            filter=lambda record: record["name"] == module,
+        )
+        yield
+    finally:
+        logger.enable(module)
+        logger.remove()
 
 
 class DataLoader:
@@ -32,6 +54,72 @@ class DataLoader:
         self.current_idx = end_idx
 
         return self.X[batch_indices], self.y[batch_indices]
+
+    def add(self, x, y):
+        new_X = jnp.concatenate((self.X, jnp.atleast_2d(x)))
+        new_Y = jnp.concatenate((self.y, y))
+        return DataLoader(
+            new_X, new_Y, batch_size=self.batch_size, shuffle=self.shuffle
+        )
+
+    def n_elements(self):
+        return self.dataset_size
+
+
+class Model(nnx.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, rngs):
+        self.linear1 = nnx.Linear(in_channels, hidden_channels, rngs=rngs)
+        self.linear2 = nnx.Linear(hidden_channels, hidden_channels, rngs=rngs)
+        self.linear3 = nnx.Linear(hidden_channels, hidden_channels, rngs=rngs)
+        self.linear4 = nnx.Linear(hidden_channels, out_channels, rngs=rngs)
+
+    def __call__(self, x):
+        x = nnx.tanh(self.linear1(x))
+        x = nnx.tanh(self.linear2(x))
+        x = nnx.tanh(self.linear3(x))
+        return self.linear4(x)
+
+
+def train_model(model, optimizer, dataloader, train_step, n_epochs=1000):
+    """Trains the given model on the data.
+
+    Args:
+        model: nnx.Module that represents the model, can be pretrained
+        optimizer: nnx.Optimizer to use for training
+        dataloader: Data on which to train
+        train_step: Function that performs the train step for one batch
+        n_epochs: Number of epochs to train for
+        lr: learning rate for optimizer
+
+    Returns:
+        Trained model
+    """
+    for epoch in range(n_epochs):
+        for x_batch, y_batch in dataloader:
+            loss = train_step(model, optimizer, x_batch, y_batch)
+
+        if epoch % 100 == 0 and epoch != 0:
+            print(f"[epoch {epoch}]: loss: {loss:.4f}")
+    print(f"Final loss: {loss:.4f}")
+    return model
+
+
+def split(model):
+    """Split an nnx module into parameters and parameter-agnostic function.
+
+    Args:
+        model: nnx.module to split.
+
+    Returns:
+        Tuple of callable function taking model input and parameters,
+        and model parameters.
+    """
+    graph_def, params = nnx.split(model)
+
+    def model_fn(input, params):
+        return nnx.call((graph_def, params))(input)[0]
+
+    return model_fn, params
 
 
 DEFAULT_INTERVALS = [

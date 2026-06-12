@@ -1,11 +1,16 @@
 """Plotting utilities."""
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+from IPython.display import HTML
+from matplotlib.animation import FuncAnimation
+from matplotlib.collections import EventCollection
+from matplotlib.colors import SymLogNorm
 from tueplots import bundles
 
 
@@ -548,3 +553,270 @@ def plot_figure_1(params, curv, *, save_fig=True):
         plt.savefig("laplax_figure_1.png", bbox_inches="tight", dpi=600)
 
     return fig, ax
+
+
+class ResultPlot:
+    def __init__(
+        self,
+        axs,
+        x,
+        pred,
+        true=None,
+        data=None,
+        criterion=None,
+        next_location=None,
+        interesting_points=None,
+        no_sampling_zone=None,
+    ):
+        self.x = x.squeeze()
+        self.pred = pred.squeeze()
+        self.axs = axs
+        self.ax = axs[0] if isinstance(axs, Iterable) else axs
+        self.artists = []
+        self.plot_prediction()
+        self.ax.set_ylim(ymin=-0.25, ymax=1.05)
+        if true is not None:
+            self.plot_ground_truth(true.squeeze())
+        if data is not None:
+            self.plot_datapoints(data)
+        if criterion is not None:
+            self.plot_criterion(criterion.squeeze())
+        if next_location is not None:
+            self.plot_next_datapoint(next_location)
+        if interesting_points is not None:
+            for point in interesting_points:
+                self.plot_interesting_point(point)
+        if no_sampling_zone is not None:
+            self.plot_no_sampling_zone(no_sampling_zone)
+        self.finalize_plot()
+
+    def plot_prediction(self):
+        self.ax.plot(self.x, self.pred, color="red", label="Mean Prediction")
+
+    def plot_ground_truth(self, true):
+        artist = self.ax.plot(
+            self.x,
+            true,
+            color="black",
+            linestyle="--",
+            label="True Function",
+        )
+        self.artists += artist
+
+    def plot_datapoints(self, data):
+        xs = data.X.squeeze()
+        offset = self.ax.get_ylim()[0]
+        x_events = EventCollection(
+            xs,
+            color="blue",
+            linelength=0.05,
+            lineoffset=offset,
+            label="Datapoint Locations",
+        )
+        artist = self.ax.add_collection(x_events)
+        self.artists += (artist,)
+
+    def plot_criterion(self, criterion):
+        artist = self.axs[1].plot(
+            self.x,
+            +criterion,
+            color="teal",
+            alpha=0.7,
+        )
+        # For legend label
+        self.ax.plot(0, 0, color="teal", alpha=0.7, label="Information Criterion")
+        self.axs[1].set_ylim(0, 2)
+        self.axs[1].set_ylabel("Information")
+        self.artists += (artist,)
+
+    def plot_uncertainty(self, uncertainty):
+        artist = self.ax.fill_between(
+            self.x,
+            self.pred - 2 * uncertainty,
+            self.pred + 2 * uncertainty,
+            color="red",
+            alpha=0.2,
+            label="95% confidence interval",
+        )
+        self.artists += (artist,)
+
+    def plot_next_datapoint(self, location):
+        offset = self.ax.get_ylim()[0]
+        x_events = EventCollection(
+            location,
+            color="blue",
+            linelength=0.2,
+            lineoffset=offset,
+            linestyle="--",
+            label="Next datapoint location",
+        )
+        artist = self.ax.add_collection(x_events)
+        self.artists += (artist,)
+
+    def plot_interesting_point(self, point):
+        artist = self.ax.axvspan(point - 0.1, point + 0.1, alpha=0.2, color="yellow")
+        self.artists += (artist,)
+
+    def plot_no_sampling_zone(self, zone):
+        artist = self.ax.axvspan(
+            zone[0], zone[1], alpha=0.2, color="grey", label="No sampling zone"
+        )
+        self.artists += (artist,)
+
+    def finalize_plot(self):
+        ax = self.ax
+
+        # symmetrize_y_axis(ax)
+        ax.set_xlabel("x")
+        ax.set_ylabel("Function value")
+        ax.legend(loc="upper right")
+
+
+def symmetrize_y_axis(axes):
+    y_max = np.max(np.abs(axes.get_ylim()))
+    axes.set_ylim(ymin=-y_max, ymax=y_max)
+
+
+def plot_model_comparison(
+    ax, x_pred, ground_truth, prediction_1, prediction_2, dataloader=None
+):
+    ground_truth = ground_truth.squeeze()
+    x_pred = x_pred.squeeze()
+
+    ax.plot(
+        x_pred,
+        jnp.zeros_like(x_pred),
+        color="black",
+        linestyle="--",
+        label="True Baseline",
+    )
+    prediction_1_difference = prediction_1.squeeze() - ground_truth
+    ax.plot(
+        x_pred,
+        prediction_1_difference,
+        color="red",
+        label="Residuals of passively learned prediction",
+    )
+
+    prediction_2_difference = prediction_2.squeeze() - ground_truth
+    ax.plot(
+        x_pred,
+        prediction_2_difference,
+        color="orange",
+        label="Residuals of actively learned prediction",
+    )
+    ax.set_ylim((-0.6, 0.6))
+    if dataloader is not None:
+        xs = dataloader.X.squeeze()
+        offset = ax.get_ylim()[0]
+        x_events = EventCollection(
+            xs,
+            color="blue",
+            linelength=0.05,
+            lineoffset=offset,
+            label="Datapoint Locations",
+        )
+        ax.add_collection(x_events)
+    ax.set_xlabel("x")
+    ax.set_ylabel("Difference from ground truth")
+    ax.legend(loc="lower right")
+
+
+def show_animation(plot_data, interesting_points=None, no_sampling_zone=None):
+    fig, ax1 = plt.subplots(figsize=(8, 4))
+    ax2 = ax1.twinx()
+
+    def update(frame):
+        ax1.clear()
+        ax2.clear()
+        plot = ResultPlot(
+            (ax1, ax2), *(plot_data[frame]), interesting_points, no_sampling_zone
+        )
+        ax2.yaxis.set_label_position("right")
+        ax2.yaxis.tick_right()
+        # ax2.set_ylim((-2.0, 2.0))
+        return plot.artists
+
+    animation = FuncAnimation(
+        fig, update, frames=len(plot_data), interval=1500, repeat_delay=2000
+    )
+    plt.close(fig)  # Prevent duplicate figure
+    return HTML(animation.to_jshtml())
+
+
+# Active classification learning example
+# --------------------------------------
+def plot_decision_boundaries(ax=None):
+    def f1(x):
+        return 1.9 * x**3 - 1.5 * x**2 + 0.5
+
+    def f2(x):
+        return -1.5 * x**2 + 2 * x + 0.2
+
+    ax = ax if ax is not None else plt.gca()
+    xs = jnp.linspace(0, 1, 100)
+    condition = jnp.logical_and(xs > 0.15343, xs < 0.94062)
+    boundary_1 = f1(xs)
+    boundary_2 = f2(xs)
+    ax.plot(xs[condition], boundary_1[condition], linestyle="--", color="black")
+    ax.plot(xs, boundary_2, linestyle="--", color="black", label="True boundary")
+    ax.legend(loc="lower right")
+
+
+def plot_datapoints(dataloader, ax=None):
+    ax = ax if ax is not None else plt.gca()
+    xs = dataloader.X[:, 0]
+    ys = dataloader.X[:, 1]
+    labels = dataloader.y
+    ax.scatter(xs, ys, c=labels, edgecolor="black")
+    ax.scatter(-1, -1, c="white", edgecolor="black", label="Datapoints")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.legend(loc="lower right")
+
+
+def plot_prediction(labels, uncertainty=None, ax=None):
+    ax = ax if ax is not None else plt.gca()
+    labels = labels.reshape((100, 100))
+    if uncertainty is not None:
+        uncertainty = np.asarray(uncertainty)
+        norm = SymLogNorm(0.001, vmin=uncertainty.min(), vmax=uncertainty.max())
+        alpha = (norm(uncertainty) + 0.0001) * 0.999
+        alpha = alpha.reshape((100, 100))
+    else:
+        alpha = 0.4
+    ax.imshow(labels, origin="lower", extent=(0, 1, 0, 1), alpha=alpha)
+
+
+def plot_next_point(point, ax=None):
+    ax = ax if ax is not None else plt.gca()
+    ax.scatter(
+        point[0],
+        point[1],
+        marker="v",
+        c="red",
+        edgecolor="black",
+        label="Next location",
+    )
+    ax.legend(loc="lower right")
+
+
+def show_animation_classification(plot_data):
+    fig, ax = plt.subplots(figsize=(6, 6))
+
+    def update(frame):
+        ax.clear()
+        grid_preds, dl, uncertainty, next_point = plot_data[frame]
+
+        plot_prediction(grid_preds, uncertainty, ax)
+        plot_datapoints(dl, ax)
+        plot_decision_boundaries(ax)
+        plot_next_point(next_point, ax)
+
+    animation = FuncAnimation(
+        fig, update, frames=len(plot_data), interval=1500, repeat_delay=2000
+    )
+    plt.close(fig)  # Prevent duplicate figure
+    # with open("animation.html", "w") as f: # save animation
+    #    f.write(animation.to_jshtml())
+    return HTML(animation.to_jshtml())
